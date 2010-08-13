@@ -1,1 +1,1 @@
-require "#{directory}/lib/javascript_test.rb"
+require File.dirname(__FILE__) + "/lib/javascript_test.rb"

@@ -31,6 +31,24 @@ class JavaScriptTest
       raise "Can't run AppleScript on #{host}" unless macos?
       system "osascript -e '#{script}' 2>&1 >/dev/null"
     end
+    
+    def teardown
+      if macos?
+        applescript <<-EOS if macos?
+          tell application "System Events"
+            tell process "#{to_s}"
+              set frontmost to true
+            end tell
+            keystroke "w" using command down
+          end tell
+        EOS
+      end
+    end
+    
+    
+    def visit(url)
+      system("open -a \"#{to_s}\" \"#{url}\"") if macos?
+    end    
   end
   
   class FirefoxBrowser < Browser
@@ -39,7 +57,7 @@ class JavaScriptTest
     end
   
     def visit(url)
-      applescript('tell application "Firefox" to Get URL "' + url + '"') if macos? 
+      super if macos? 
       system("#{@path} #{url}") if windows? 
       system("firefox #{url}") if linux?
     end
@@ -47,6 +65,7 @@ class JavaScriptTest
     def to_s
       "Firefox"
     end
+    
   end
   
   class SafariBrowser < Browser
@@ -54,20 +73,28 @@ class JavaScriptTest
       macos?
     end
     
-    def setup
-      applescript('tell application "Safari" to make new document')
-    end
-    
     def visit(url)
-      applescript('tell application "Safari" to set URL of front document to "' + url + '"')
-    end
-  
-    def teardown
-      #applescript('tell application "Safari" to close front document')
+      super if macos?
+      # TODO windows
     end
   
     def to_s
       "Safari"
+    end
+  end
+  
+  class ChromeBrowser < Browser
+    def supported?
+      macos?
+    end
+    
+    def visit(url)
+      super if macos?
+      # TODO windows
+    end
+  
+    def to_s
+      'Google Chrome'
     end
   end
   
@@ -152,7 +179,7 @@ class JavaScriptTest
   
       @server = WEBrick::HTTPServer.new(:Port => 4711) # TODO: make port configurable
       @server.mount_proc("/results") do |req, res|
-        @queue.push(req.query['result'])
+        @queue.push(ActiveSupport::JSON.decode(req.query['json']))
         res.body = "OK"
       end
       yield self if block_given?
@@ -163,26 +190,81 @@ class JavaScriptTest
     def successful?
       @result
     end
-  
+    
+    def red(text); colorize(text, "\e[31m"); end
+    def green(text); colorize(text, "\e[32m"); end
+    
+    def colorize(text, color_code)
+      "#{color_code}#{text}\e[0m"
+    end
+    
+    def success?(result)
+      result['failures'].to_i == 0
+    end
+        
+    def add_result(test, result)
+      @results ||= []
+      @results << [test, result]
+      success?(result)
+    end
+    
+    def print_result(browser)
+      sum = {}
+      failed = []
+      all_ok = true
+      @results.each do |row| 
+        test, result = row
+        ok = success?(result)
+        
+        if !ok 
+          failed << test
+        end
+        
+        all_ok &= ok
+        result.except('failedTests').inject(sum) do |m, i|
+               k, v = i
+               m[k] ||= 0
+               m[k] += v.to_i
+               m
+        end
+      end
+      if all_ok
+        puts "#{green(browser)}\n #{sum['tests']} tests, #{sum['assertions']} assertions, #{sum['failures']} failures"
+      else
+        puts "#{red(browser)}"
+        @results.each do |row|
+          test, result = row
+          unless success?(result)
+            puts " #{test} "
+            puts "   " + red(result['failedTests'].join("\n   "))
+          end
+        end
+        puts " #{sum['tests']} tests, #{sum['assertions']} assertions, #{sum['failures']} failures"
+      
+      end
+      puts ""
+      @results = []
+      all_ok
+    end
+
     def define
-      trap("INT") { @server.shutdown }
+      trap("INT") {
+        Thread.current.kill
+        @server.shutdown 
+      }
       t = Thread.new { @server.start }
       
       # run all combinations of browsers and tests
       @browsers.each do |browser|
         if browser.supported?
-          browser.setup
           @tests.each do |test|
-            browser.visit("http://localhost:4711#{test}?resultsURL=http://localhost:4711/results&t=" + ("%.6f" % Time.now.to_f))
-            result = @queue.pop
-            puts "#{test} on #{browser}: #{result}"
-            @result = false unless result == 'SUCCESS'
+            browser.visit("http://localhost:4711#{test}?resultsURL=http://localhost:4711/results")
+            browser.teardown if add_result(test, @queue.pop)
           end
-          browser.teardown
+          print_result(browser)
         else
-          puts "Skipping #{browser}, not supported on this OS"
+          puts "#{browser} skipped, not supported on this OS"
         end
-        browser.teardown
       end
       
       @server.shutdown
@@ -198,8 +280,8 @@ class JavaScriptTest
     # test should be specified as a url
     def run(test)
       url = "/test/javascript/#{test}_test.html"
-      unless File.exists?(RAILS_ROOT+url)
-        raise "Missing test file #{url} for #{test}"
+      unless File.exists?(File.join(Rails.root,url))
+        raise "Missing test file #{url} for #{test} #{File.join(Rails.root,url)}"
       end
       @tests << url
     end
@@ -211,6 +293,8 @@ class JavaScriptTest
             FirefoxBrowser.new
           when :safari
             SafariBrowser.new
+          when :chrome
+            ChromeBrowser.new
           when :ie
             IEBrowser.new
           when :konqueror

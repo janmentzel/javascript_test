@@ -1,0 +1,8 @@
+Description:
+    Generates QUnit-based JavaScript test
+
+Example:
+    rails generate javascript_test Thing
+
+    This will create:
+        test/javascript/thing_test.html
